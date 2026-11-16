@@ -1,0 +1,6 @@
+{
+  "name": "AVERT",
+  "description": "Adversarial Visual Editing Restriction Technology — cryptographic policy enforcement and experimental ImageProtector visual prompt injection research prototype.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
