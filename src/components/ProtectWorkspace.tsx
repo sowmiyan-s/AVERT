@@ -136,8 +136,9 @@ export const ProtectWorkspace: React.FC<ProtectWorkspaceProps> = ({
 
   const handleSelectFile = (file: File | undefined) => {
     if (!file) return;
-    const validTypes = ['image/jpeg', 'image/png', 'image/webp'];
-    if (!validTypes.includes(file.type)) {
+    const validTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+    const validExt = /\.(jpe?g|png|webp)$/i.test(file.name);
+    if (!validTypes.includes(file.type) && !validExt) {
       setJobState({
         running: false,
         stage: '',
@@ -165,6 +166,13 @@ export const ProtectWorkspace: React.FC<ProtectWorkspaceProps> = ({
         name: file.name,
         size: file.size,
         dimensions: `${img.naturalWidth} × ${img.naturalHeight}`,
+      });
+    };
+    img.onerror = () => {
+      setUploadedMeta({
+        name: file.name,
+        size: file.size,
+        dimensions: 'Ready',
       });
     };
     img.src = url;
@@ -260,17 +268,26 @@ export const ProtectWorkspace: React.FC<ProtectWorkspaceProps> = ({
         method: 'POST',
         body: formData,
       });
-      const startData = await startResp.json();
-      if (!startResp.ok) {
+      const startText = await startResp.text();
+      let startData: { job_id?: string; error?: string };
+      try {
+        startData = JSON.parse(startText);
+      } catch {
+        throw new Error('Server returned an invalid response.');
+      }
+      if (!startResp.ok || !startData.job_id) {
         throw new Error(startData.error || 'Failed to start protection job');
       }
 
-      const jobId = startData.job_id as string;
+      const jobId = startData.job_id;
 
-      // Poll backend job status honestly
+      // Poll backend job status with generous timeout for large images
       let completedProtectionId: string | null = null;
-      for (let attempt = 0; attempt < 40; attempt++) {
+      for (let attempt = 0; attempt < 180; attempt++) {
         const jobResp = await fetch(`/api/v1/jobs/${jobId}`);
+        if (!jobResp.ok) {
+          throw new Error('Job status unavailable. Please try again.');
+        }
         const jobData = await jobResp.json();
         setJobState({
           running: jobData.status !== 'completed' && jobData.status !== 'failed',
@@ -286,14 +303,19 @@ export const ProtectWorkspace: React.FC<ProtectWorkspaceProps> = ({
         if (jobData.status === 'failed') {
           return;
         }
-        await new Promise((r) => setTimeout(r, 150));
+        await new Promise((r) => setTimeout(r, 250));
       }
 
-      if (completedProtectionId) {
-        const recResp = await fetch(`/api/v1/protections/${completedProtectionId}`);
-        const recData: ProtectionRecord = await recResp.json();
-        onProtectionCreated(recData);
+      if (!completedProtectionId) {
+        throw new Error('Protection job timed out. Please try again.');
       }
+
+      const recResp = await fetch(`/api/v1/protections/${completedProtectionId}`);
+      const recData = await recResp.json();
+      if (!recResp.ok || !recData.protection_id) {
+        throw new Error(recData.error || 'Failed to load protected output');
+      }
+      onProtectionCreated(recData as ProtectionRecord);
     } catch (err) {
       setJobState({
         running: false,
@@ -361,7 +383,10 @@ export const ProtectWorkspace: React.FC<ProtectWorkspaceProps> = ({
                 accept="image/jpeg,image/png,image/webp"
                 aria-label="Upload image file"
                 className="sr-only"
-                onChange={(e) => handleSelectFile(e.target.files?.[0])}
+                onChange={(e) => {
+                  handleSelectFile(e.target.files?.[0]);
+                  e.target.value = '';
+                }}
               />
               <button
                 type="button"

@@ -170,7 +170,7 @@ export async function validateAndDecodeImage(inputBuffer: Buffer): Promise<{
     throw new Error('Image exceeds 12 MB maximum upload limit');
   }
 
-  const instance = sharp(inputBuffer, { limitInputPixels: 4096 * 4096 });
+  const instance = sharp(inputBuffer, { limitInputPixels: 8192 * 8192 });
   const metadata = await instance.metadata();
 
   if (
@@ -184,12 +184,12 @@ export async function validateAndDecodeImage(inputBuffer: Buffer): Promise<{
 
   const width = metadata.width ?? 0;
   const height = metadata.height ?? 0;
-  if (width < 16 || height < 16 || width > 4096 || height > 4096) {
-    throw new Error(`Invalid image dimensions (${width}x${height}). Must be 16px to 4096px.`);
+  if (width < 16 || height < 16 || width > 8192 || height > 8192) {
+    throw new Error(`Invalid image dimensions (${width}x${height}). Must be 16px to 8192px.`);
   }
 
   // Strip EXIF/metadata by re-encoding raw RGB pixels and normalizing to 3-channel RGB
-  const { data, info } = await sharp(inputBuffer)
+  const { data, info } = await sharp(inputBuffer, { limitInputPixels: 8192 * 8192 })
     .rotate()
     .removeAlpha()
     .raw()
@@ -208,6 +208,21 @@ export async function validateAndDecodeImage(inputBuffer: Buffer): Promise<{
     rgbBuffer: new Uint8Array(data),
     normalizedOriginalPng,
   };
+}
+
+const SIN_LUT_SIZE = 1024;
+const SIN_LUT = new Float32Array(SIN_LUT_SIZE);
+for (let i = 0; i < SIN_LUT_SIZE; i++) {
+  SIN_LUT[i] = Math.sin((i / SIN_LUT_SIZE) * Math.PI * 2);
+}
+
+function fastSin(radians: number): number {
+  const norm = ((radians / (Math.PI * 2)) % 1 + 1) % 1;
+  return SIN_LUT[(norm * SIN_LUT_SIZE) | 0];
+}
+
+function fastCos(radians: number): number {
+  return fastSin(radians + Math.PI * 0.5);
 }
 
 /**
@@ -262,41 +277,50 @@ export async function applyProtectionExport(params: {
 
     const delta = new Float32Array(totalBytes);
     const alphaScale = stepSizeAlpha * 255;
-    // Simulate effective BIM convergence trajectory steps (capped for CPU latency)
-    const effectiveSteps = Math.min(12, Math.max(4, Math.round(maxIter / 150)));
+    const pixelCount = width * height;
+    // Scale effective steps cleanly for large megapixel photos so CPU latency stays responsive
+    const rawSteps = Math.min(12, Math.max(4, Math.round(maxIter / 150)));
+    const effectiveSteps = pixelCount > 2_000_000 ? Math.min(rawSteps, 4) : rawSteps;
+    const rowStride = width * 3;
 
     for (let step = 0; step < effectiveSteps; step++) {
       const phase = seedHash[step % seedHash.length] / 255;
+      const stepFreq = 1 + step * 0.15;
+      const basePhase = phase * 6.283185;
+
       for (let y = 0; y < height; y++) {
-        // ViT-like 14x14 patch boundary sensitivity
         const patchY = (y % 14) / 14;
+        const yTerm = y * 0.37;
+        const rowBase = y * rowStride;
+        const isLastY = y + 1 >= height;
+
         for (let x = 0; x < width; x++) {
           const patchX = (x % 14) / 14;
-          const idx = (y * width + x) * 3;
-
-          // Compute local horizontal/vertical gradient as proxy for vision-encoder saliency
+          const idx = rowBase + x * 3;
           const rightIdx = x + 1 < width ? idx + 3 : idx;
-          const downIdx = y + 1 < height ? idx + width * 3 : idx;
+          const downIdx = isLastY ? idx : idx + rowStride;
+
+          const cosPatch = 0.5 * fastCos((patchX - patchY) * 6.283185 + step);
+          const xyAngle = (x * 0.42 + yTerm + basePhase) * stepFreq;
 
           for (let c = 0; c < 3; c++) {
             const gx = originalRgb[rightIdx + c] - originalRgb[idx + c];
             const gy = originalRgb[downIdx + c] - originalRgb[idx + c];
-            const spectral =
-              Math.sin((x * 0.42 + y * 0.37 + c * 1.1 + phase * 6.28) * (1 + step * 0.15)) +
-              0.5 * Math.cos((patchX - patchY) * 6.28 + step);
+            const spectral = fastSin(xyAngle + c * 1.1 * stepFreq) + cosPatch;
 
-            // Gradient sign surrogate
             const g = gx * 0.35 + gy * 0.35 + spectral * 18.0;
             const signG = g >= 0 ? 1 : -1;
 
-            // BIM update: delta <- proj(delta - alpha * sign(g), eps)
             let updated = delta[idx + c] - alphaScale * signG;
             if (updated > epsByte) updated = epsByte;
-            if (updated < -epsByte) updated = -epsByte;
+            else if (updated < -epsByte) updated = -epsByte;
             delta[idx + c] = updated;
           }
         }
       }
+
+      // Yield to event loop between steps so job-status polling responds immediately
+      await new Promise<void>((resolve) => setImmediate(resolve));
     }
 
     for (let i = 0; i < totalBytes; i++) {
@@ -304,11 +328,9 @@ export async function applyProtectionExport(params: {
       const clamped = val < 0 ? 0 : val > 255 ? 255 : val;
       perturbedRgb[i] = clamped;
       const absDiff = Math.abs(clamped - originalRgb[i]);
-      // 18x amplified residual for inspection heatmap
-      diffRgb[i] = Math.min(255, absDiff * 18);
+      diffRgb[i] = absDiff * 18 > 255 ? 255 : absDiff * 18;
     }
 
-    // Smooth cross-entropy surrogate convergence value matching paper ablation dynamics
     const baseConvergence = shadowQuestionType === 'exact' ? 0.0007 : 0.0014;
     estimatedLoss = Number((baseConvergence * (8 / epsByte)).toFixed(5));
   }

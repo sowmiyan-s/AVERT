@@ -41,6 +41,7 @@ export const EditorLabWorkspace: React.FC<EditorLabWorkspaceProps> = ({
   const [grantId, setGrantId] = useState<string>('');
   const [strictMode, setStrictMode] = useState<boolean>(true);
   const [runningEditor, setRunningEditor] = useState<boolean>(false);
+  const [editorError, setEditorError] = useState<string | null>(null);
   const [editorResult, setEditorResult] = useState<{
     executed: boolean;
     decision: string;
@@ -55,6 +56,7 @@ export const EditorLabWorkspace: React.FC<EditorLabWorkspaceProps> = ({
     'none' | 'jpeg_75' | 'gaussian_noise_001' | 'gaussian_noise_020' | 'resize_50_up' | 'crop_10'
   >('none');
   const [runningProbe, setRunningProbe] = useState<boolean>(false);
+  const [probeError, setProbeError] = useState<string | null>(null);
   const [probeResult, setProbeResult] = useState<{
     transform_applied: string;
     binding_intact_after_transform: boolean;
@@ -68,6 +70,7 @@ export const EditorLabWorkspace: React.FC<EditorLabWorkspaceProps> = ({
   const handleRunCompatibleEditor = async () => {
     if (!activeRecord) return;
     setRunningEditor(true);
+    setEditorError(null);
     try {
       const resp = await fetch('/api/v1/editor/execute', {
         method: 'POST',
@@ -80,7 +83,13 @@ export const EditorLabWorkspace: React.FC<EditorLabWorkspaceProps> = ({
         }),
       });
       const data = await resp.json();
-      setEditorResult(data);
+      if (!resp.ok || !data?.verification) {
+        setEditorError(data?.error || 'Failed to evaluate compatible editor request.');
+      } else {
+        setEditorResult(data);
+      }
+    } catch {
+      setEditorError('Failed to contact compatible editor service.');
     } finally {
       setRunningEditor(false);
     }
@@ -89,6 +98,7 @@ export const EditorLabWorkspace: React.FC<EditorLabWorkspaceProps> = ({
   const handleRunNonCooperativeProbe = async () => {
     if (!activeRecord) return;
     setRunningProbe(true);
+    setProbeError(null);
     try {
       const resp = await fetch('/api/v1/probe/non-cooperative', {
         method: 'POST',
@@ -100,7 +110,13 @@ export const EditorLabWorkspace: React.FC<EditorLabWorkspaceProps> = ({
         }),
       });
       const data = await resp.json();
-      setProbeResult(data);
+      if (!resp.ok || !data?.judgeVerdict) {
+        setProbeError(data?.error || 'Failed to run MLLM probe.');
+      } else {
+        setProbeResult(data);
+      }
+    } catch {
+      setProbeError('Failed to run MLLM probe.');
     } finally {
       setRunningProbe(false);
     }
@@ -229,6 +245,11 @@ export const EditorLabWorkspace: React.FC<EditorLabWorkspaceProps> = ({
                 <Play className="h-4 w-4" aria-hidden="true" />
                 {runningEditor ? 'Checking Policy & Running Gate...' : 'Submit Edit to Compatible Editor'}
               </button>
+              {editorError && (
+                <p role="alert" className="text-xs font-medium text-red-700">
+                  {editorError}
+                </p>
+              )}
             </div>
 
             {editorResult && (
@@ -343,6 +364,11 @@ export const EditorLabWorkspace: React.FC<EditorLabWorkspaceProps> = ({
                 <FlaskConical className="h-4 w-4" aria-hidden="true" />
                 {runningProbe ? 'Running Probe...' : 'Run MLLM Probe'}
               </button>
+              {probeError && (
+                <p role="alert" className="text-xs font-medium text-red-700">
+                  {probeError}
+                </p>
+              )}
             </div>
 
             {probeResult && (

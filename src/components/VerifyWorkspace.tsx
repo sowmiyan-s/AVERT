@@ -63,10 +63,18 @@ export const VerifyWorkspace: React.FC<VerifyWorkspaceProps> = ({
         body: JSON.stringify({ protection_id: protectionId }),
       });
       const data = await resp.json();
-      setVerification(data);
+      if (!resp.ok || !data?.checks) {
+        setManualError(data?.error || 'Verification failed.');
+      } else {
+        setVerification(data);
+      }
       const auditResp = await fetch(`/api/v1/audit/${protectionId}`);
-      const auditData = await auditResp.json();
-      setAuditEvents(auditData.events ?? []);
+      if (auditResp.ok) {
+        const auditData = await auditResp.json();
+        setAuditEvents(auditData.events ?? []);
+      }
+    } catch {
+      setManualError('Failed to contact verification service.');
     } finally {
       setVerifying(false);
     }
@@ -82,6 +90,7 @@ export const VerifyWorkspace: React.FC<VerifyWorkspaceProps> = ({
   const handleSimulateTamper = async (mode: 'recompress_jpeg' | 'tamper_manifest_policy') => {
     if (!activeRecord) return;
     setVerifying(true);
+    setManualError(null);
     try {
       const resp = await fetch('/api/v1/verify/simulate-tamper', {
         method: 'POST',
@@ -92,10 +101,18 @@ export const VerifyWorkspace: React.FC<VerifyWorkspaceProps> = ({
         }),
       });
       const data = await resp.json();
-      setVerification(data);
+      if (!resp.ok || !data?.checks) {
+        setManualError(data?.error || 'Tamper simulation failed.');
+      } else {
+        setVerification(data);
+      }
       const auditResp = await fetch(`/api/v1/audit/${activeRecord.protection_id}`);
-      const auditData = await auditResp.json();
-      setAuditEvents(auditData.events ?? []);
+      if (auditResp.ok) {
+        const auditData = await auditResp.json();
+        setAuditEvents(auditData.events ?? []);
+      }
+    } catch {
+      setManualError('Failed to run tamper simulation.');
     } finally {
       setVerifying(false);
     }
@@ -103,29 +120,48 @@ export const VerifyWorkspace: React.FC<VerifyWorkspaceProps> = ({
 
   const handleIssueGrant = async () => {
     if (!activeRecord) return;
-    const resp = await fetch('/api/v1/authorize', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        protection_id: activeRecord.protection_id,
-        permitted_operation: 'single_authorized_edit',
-        ttl_minutes: 15,
-      }),
-    });
-    const grant = await resp.json();
-    if (resp.ok) {
-      setIssuedGrant(grant);
-      const auditResp = await fetch(`/api/v1/audit/${activeRecord.protection_id}`);
-      const auditData = await auditResp.json();
-      setAuditEvents(auditData.events ?? []);
+    setManualError(null);
+    try {
+      const resp = await fetch('/api/v1/authorize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          protection_id: activeRecord.protection_id,
+          permitted_operation: 'single_authorized_edit',
+          ttl_minutes: 15,
+        }),
+      });
+      const grant = await resp.json();
+      if (resp.ok) {
+        setIssuedGrant(grant);
+        const auditResp = await fetch(`/api/v1/audit/${activeRecord.protection_id}`);
+        if (auditResp.ok) {
+          const auditData = await auditResp.json();
+          setAuditEvents(auditData.events ?? []);
+        }
+      } else {
+        setManualError(grant?.error || 'Failed to issue authorization grant.');
+      }
+    } catch {
+      setManualError('Failed to issue authorization grant.');
     }
   };
 
   const handleRevoke = async () => {
     if (!activeRecord) return;
-    await fetch(`/api/v1/revoke/${activeRecord.protection_id}`, { method: 'POST' });
-    onRefreshProtections();
-    await runVerifyForRecord(activeRecord.protection_id);
+    setManualError(null);
+    try {
+      const resp = await fetch(`/api/v1/revoke/${activeRecord.protection_id}`, { method: 'POST' });
+      if (!resp.ok) {
+        const data = await resp.json().catch(() => ({}));
+        setManualError(data?.error || 'Failed to revoke credential.');
+        return;
+      }
+      onRefreshProtections();
+      await runVerifyForRecord(activeRecord.protection_id);
+    } catch {
+      setManualError('Failed to revoke credential.');
+    }
   };
 
   const handleManualFileVerify = async () => {
@@ -150,8 +186,8 @@ export const VerifyWorkspace: React.FC<VerifyWorkspaceProps> = ({
         body: formData,
       });
       const data = await resp.json();
-      if (!resp.ok) {
-        setManualError(data.error || 'Verification failed');
+      if (!resp.ok || !data?.checks) {
+        setManualError(data?.error || 'Verification failed');
       } else {
         setVerification(data);
       }

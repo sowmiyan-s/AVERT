@@ -2,7 +2,7 @@ import 'dotenv/config';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import express, { type Request, type Response } from 'express';
+import express, { type NextFunction, type Request, type Response } from 'express';
 import multer from 'multer';
 import sharp from 'sharp';
 import { createServer as createViteServer } from 'vite';
@@ -294,18 +294,23 @@ async function startServer() {
   });
 
   app.post('/api/v1/shadow-questions', async (req: Request, res: Response) => {
-    const type = (req.body?.type ?? 'general') as ShadowQuestionType;
-    const exampleQuestion = String(
-      req.body?.example_question ?? 'Where was this photo taken?'
-    );
-    const count = Number(req.body?.count ?? 10);
+    try {
+      const type = (req.body?.type ?? 'general') as ShadowQuestionType;
+      const exampleQuestion = String(
+        req.body?.example_question ?? 'Where was this photo taken?'
+      );
+      const count = Number(req.body?.count ?? 10);
 
-    const result = await generateShadowQuestions({
-      type,
-      exampleQuestion,
-      count,
-    });
-    res.json(result);
+      const result = await generateShadowQuestions({
+        type,
+        exampleQuestion,
+        count,
+      });
+      res.json(result);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to generate shadow questions';
+      res.status(500).json({ error: msg });
+    }
   });
 
   app.post(
@@ -765,53 +770,79 @@ async function startServer() {
   });
 
   app.post('/api/v1/probe/non-cooperative', async (req: Request, res: Response) => {
-    const protectionId = String(req.body?.protection_id ?? '');
-    const probingQuestion = String(
-      req.body?.probing_question ?? 'Describe the people, text, and location in this image.'
-    ).trim();
-    const transform = (req.body?.transform ?? 'none') as
-      | 'none'
-      | 'jpeg_75'
-      | 'gaussian_noise_001'
-      | 'gaussian_noise_020'
-      | 'resize_50_up'
-      | 'crop_10';
+    try {
+      const protectionId = String(req.body?.protection_id ?? '');
+      const probingQuestion = String(
+        req.body?.probing_question ?? 'Describe the people, text, and location in this image.'
+      ).trim();
+      const transform = (req.body?.transform ?? 'none') as
+        | 'none'
+        | 'jpeg_75'
+        | 'gaussian_noise_001'
+        | 'gaussian_noise_020'
+        | 'resize_50_up'
+        | 'crop_10';
 
-    const entry = getProtection(protectionId);
-    if (!entry) {
-      res.status(404).json({ error: 'Protection record not found' });
+      const entry = getProtection(protectionId);
+      if (!entry) {
+        res.status(404).json({ error: 'Protection record not found' });
+        return;
+      }
+
+      const transformed = await applyAttackerTransformation({
+        imageBuffer: entry.protectedBuffer,
+        transform,
+      });
+
+      const probeResult = await runNonCooperativeMllmProbe({
+        imageBuffer: transformed.buffer,
+        mimeType: transformed.mimeType,
+        probingQuestion,
+      });
+
+      const transformedSha = sha256Hex(transformed.buffer);
+      const bindingIntact = transformedSha === entry.record.protected_sha256;
+
+      recordAuditEvent({
+        protection_id: protectionId,
+        event_type: 'non_cooperative_probe',
+        decision: probeResult.judgeVerdict,
+        reason_code: transform.toUpperCase(),
+        details: `Non-cooperative probe (${transformed.description}): Judge verdict = ${probeResult.judgeVerdict}.`,
+      });
+
+      res.json({
+        transform_applied: transformed.description,
+        binding_intact_after_transform: bindingIntact,
+        transformed_sha256: transformedSha,
+        probing_question: probingQuestion,
+        ...probeResult,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Probe execution failed';
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  app.use('/api', (_req: Request, res: Response) => {
+    res.status(404).json({ error: 'API endpoint not found' });
+  });
+
+  app.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
+    if (!req.path.startsWith('/api')) {
+      next(err);
       return;
     }
-
-    const transformed = await applyAttackerTransformation({
-      imageBuffer: entry.protectedBuffer,
-      transform,
-    });
-
-    const probeResult = await runNonCooperativeMllmProbe({
-      imageBuffer: transformed.buffer,
-      mimeType: transformed.mimeType,
-      probingQuestion,
-    });
-
-    const transformedSha = sha256Hex(transformed.buffer);
-    const bindingIntact = transformedSha === entry.record.protected_sha256;
-
-    recordAuditEvent({
-      protection_id: protectionId,
-      event_type: 'non_cooperative_probe',
-      decision: probeResult.judgeVerdict,
-      reason_code: transform.toUpperCase(),
-      details: `Non-cooperative probe (${transformed.description}): Judge verdict = ${probeResult.judgeVerdict}.`,
-    });
-
-    res.json({
-      transform_applied: transformed.description,
-      binding_intact_after_transform: bindingIntact,
-      transformed_sha256: transformedSha,
-      probing_question: probingQuestion,
-      ...probeResult,
-    });
+    if (err instanceof multer.MulterError) {
+      const message =
+        err.code === 'LIMIT_FILE_SIZE'
+          ? 'File exceeds the 12 MB upload limit.'
+          : err.message || 'File upload failed.';
+      res.status(err.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({ error: message });
+      return;
+    }
+    const message = err instanceof Error ? err.message : 'Unexpected server error';
+    res.status(500).json({ error: message });
   });
 
   await seedDemoProtection();
