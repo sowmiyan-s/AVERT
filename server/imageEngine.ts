@@ -5,7 +5,7 @@ import {
   type ImageQualityMetrics,
   type OutputImageFormat,
   type ShadowQuestionType,
-} from '../src/lib/avertProtocol.js';
+} from '../src/lib/avertProtocol.ts';
 
 export interface SampleImageDescriptor {
   id: string;
@@ -156,6 +156,67 @@ export async function getSampleImageBuffer(sampleId: string): Promise<Buffer> {
   return pngBuffer;
 }
 
+const SUPPORTED_SHARP_FORMATS = new Set([
+  'jpeg',
+  'png',
+  'webp',
+  'gif',
+  'tiff',
+  'heif',
+  'svg',
+]);
+
+function decodeUncompressedBmp(inputBuffer: Buffer): {
+  width: number;
+  height: number;
+  rgbBuffer: Uint8Array;
+} {
+  if (inputBuffer.length < 54 || inputBuffer[0] !== 0x42 || inputBuffer[1] !== 0x4d) {
+    throw new Error('Invalid BMP header');
+  }
+  const pixelOffset = inputBuffer.readUInt32LE(10);
+  const dibSize = inputBuffer.readUInt32LE(14);
+  if (dibSize < 40) {
+    throw new Error('Unsupported BMP header variant');
+  }
+  const width = inputBuffer.readInt32LE(18);
+  const rawHeight = inputBuffer.readInt32LE(22);
+  const height = Math.abs(rawHeight);
+  const topDown = rawHeight < 0;
+  const planes = inputBuffer.readUInt16LE(26);
+  const bpp = inputBuffer.readUInt16LE(28);
+  const compression = inputBuffer.readUInt32LE(30);
+
+  if (planes !== 1 || (bpp !== 24 && bpp !== 32) || (compression !== 0 && compression !== 3)) {
+    throw new Error(`Unsupported BMP encoding (${bpp}bpp, compression ${compression})`);
+  }
+  if (width < 16 || height < 16 || width > 8192 || height > 8192) {
+    throw new Error(`Invalid BMP dimensions (${width}x${height}). Must be 16px to 8192px.`);
+  }
+
+  const bytesPerPixel = bpp / 8;
+  const rowStride = Math.floor((width * bpp + 31) / 32) * 4;
+  if (pixelOffset + rowStride * height > inputBuffer.length) {
+    throw new Error('Truncated BMP pixel data');
+  }
+
+  const rgb = new Uint8Array(width * height * 3);
+  for (let y = 0; y < height; y++) {
+    const srcY = topDown ? y : height - 1 - y;
+    const srcRow = pixelOffset + srcY * rowStride;
+    const dstRow = y * width * 3;
+    for (let x = 0; x < width; x++) {
+      const s = srcRow + x * bytesPerPixel;
+      const d = dstRow + x * 3;
+      // BMP stores BGR(A)
+      rgb[d] = inputBuffer[s + 2];
+      rgb[d + 1] = inputBuffer[s + 1];
+      rgb[d + 2] = inputBuffer[s];
+    }
+  }
+  return { width, height, rgbBuffer: rgb };
+}
+
 export async function validateAndDecodeImage(inputBuffer: Buffer): Promise<{
   width: number;
   height: number;
@@ -170,35 +231,57 @@ export async function validateAndDecodeImage(inputBuffer: Buffer): Promise<{
     throw new Error('Image exceeds 12 MB maximum upload limit');
   }
 
+  // Handle Windows/Desktop BMP files cleanly even without libvips BMP support
+  if (inputBuffer.length >= 54 && inputBuffer[0] === 0x42 && inputBuffer[1] === 0x4d) {
+    const bmp = decodeUncompressedBmp(inputBuffer);
+    const normalizedOriginalPng = await sharp(bmp.rgbBuffer, {
+      raw: { width: bmp.width, height: bmp.height, channels: 3 },
+    })
+      .toColorspace('srgb')
+      .png({ palette: false })
+      .toBuffer();
+
+    return {
+      width: bmp.width,
+      height: bmp.height,
+      format: 'bmp',
+      rgbBuffer: bmp.rgbBuffer,
+      normalizedOriginalPng,
+    };
+  }
+
   const instance = sharp(inputBuffer, { limitInputPixels: 8192 * 8192 });
   const metadata = await instance.metadata();
 
-  if (
-    !metadata.format ||
-    !['jpeg', 'png', 'webp'].includes(metadata.format)
-  ) {
+  if (!metadata.format || !SUPPORTED_SHARP_FORMATS.has(metadata.format)) {
     throw new Error(
-      `Unsupported image format "${metadata.format ?? 'unknown'}". Allowed: JPEG, PNG, WebP.`
+      `Unsupported image format "${metadata.format ?? 'unknown'}". Supported: JPEG, PNG, WebP, HEIC/AVIF, GIF, TIFF, BMP, SVG.`
     );
   }
 
-  const width = metadata.width ?? 0;
-  const height = metadata.height ?? 0;
-  if (width < 16 || height < 16 || width > 8192 || height > 8192) {
-    throw new Error(`Invalid image dimensions (${width}x${height}). Must be 16px to 8192px.`);
+  const metaWidth = metadata.width ?? 0;
+  const metaHeight = metadata.height ?? 0;
+  if (metaWidth < 16 || metaHeight < 16 || metaWidth > 8192 || metaHeight > 8192) {
+    throw new Error(`Invalid image dimensions (${metaWidth}x${metaHeight}). Must be 16px to 8192px.`);
   }
 
-  // Strip EXIF/metadata by re-encoding raw RGB pixels and normalizing to 3-channel RGB
+  // Normalize orientation (EXIF rotate), convert CMYK/Grayscale/P3/16-bit to 8-bit 3-channel sRGB
   const { data, info } = await sharp(inputBuffer, { limitInputPixels: 8192 * 8192 })
     .rotate()
+    .toColorspace('srgb')
     .removeAlpha()
     .raw()
     .toBuffer({ resolveWithObject: true });
 
+  if (info.channels !== 3) {
+    throw new Error(`Could not normalize image channels to sRGB (got ${info.channels}).`);
+  }
+
   const normalizedOriginalPng = await sharp(data, {
     raw: { width: info.width, height: info.height, channels: 3 },
   })
-    .png()
+    .toColorspace('srgb')
+    .png({ palette: false })
     .toBuffer();
 
   return {
@@ -337,21 +420,26 @@ export async function applyProtectionExport(params: {
 
   let pipeline = sharp(perturbedRgb, {
     raw: { width, height, channels: 3 },
-  });
+  }).toColorspace('srgb');
 
   if (outputFormat === 'jpeg') {
-    pipeline = pipeline.jpeg({ quality: 95, mozjpeg: true });
+    pipeline = pipeline.jpeg({
+      quality: 95,
+      mozjpeg: true,
+      progressive: false,
+      chromaSubsampling: '4:2:0',
+    });
   } else if (outputFormat === 'webp') {
     pipeline = pipeline.webp({ quality: 95 });
   } else {
-    pipeline = pipeline.png({ compressionLevel: 6 });
+    pipeline = pipeline.png({ compressionLevel: 6, palette: false });
   }
 
   const exportedBuffer = await pipeline.toBuffer();
 
-  // Decode exported bytes back to raw RGB so quality metrics reflect real exported pixels
-  // (including any JPEG/WebP quantization loss if those formats were selected!)
+  // Decode exported bytes back to raw sRGB so quality metrics reflect real exported pixels
   const { data: decodedExportedRgb } = await sharp(exportedBuffer)
+    .toColorspace('srgb')
     .removeAlpha()
     .raw()
     .toBuffer({ resolveWithObject: true });
@@ -452,6 +540,7 @@ export async function applyAttackerTransformation(params: {
   const sigmaNorm = transform === 'gaussian_noise_020' ? 0.02 : 0.001;
   const sigmaByte = sigmaNorm * 255;
   const { data, info } = await sharp(imageBuffer)
+    .toColorspace('srgb')
     .removeAlpha()
     .raw()
     .toBuffer({ resolveWithObject: true });

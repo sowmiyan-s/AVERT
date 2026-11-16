@@ -82,9 +82,17 @@ export const EditorLabWorkspace: React.FC<EditorLabWorkspaceProps> = ({
           strict_mode: strictMode,
         }),
       });
-      const data = await resp.json();
-      if (!resp.ok || !data?.verification) {
-        setEditorError(data?.error || 'Failed to evaluate compatible editor request.');
+      const text = await resp.text();
+      let data: any = null;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = null;
+      }
+      if (!data || !resp.ok || !data?.verification) {
+        setEditorError(
+          data?.error || `Failed to evaluate compatible editor request (HTTP ${resp.status}).`
+        );
       } else {
         setEditorResult(data);
       }
@@ -109,9 +117,15 @@ export const EditorLabWorkspace: React.FC<EditorLabWorkspaceProps> = ({
           transform: attackerTransform,
         }),
       });
-      const data = await resp.json();
-      if (!resp.ok || !data?.judgeVerdict) {
-        setProbeError(data?.error || 'Failed to run MLLM probe.');
+      const text = await resp.text();
+      let data: any = null;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = null;
+      }
+      if (!data || !resp.ok || !data?.judgeVerdict) {
+        setProbeError(data?.error || `Failed to run MLLM probe (HTTP ${resp.status}).`);
       } else {
         setProbeResult(data);
       }

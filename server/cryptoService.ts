@@ -7,7 +7,7 @@ import {
   type AvertManifest,
   type AvertManifestUnsigned,
   type ProtectionRecord,
-} from '../src/lib/avertProtocol.js';
+} from '../src/lib/avertProtocol.ts';
 
 const KEY_ID = 'avert-ed25519-key-01';
 

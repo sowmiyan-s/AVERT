@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  buildContentDisposition,
   buildRefusalJudgePrompt,
   canonicalSerialize,
   computeImageQualityMetrics,
@@ -178,10 +179,21 @@ test('resolveOutputFormat and resolveDownloadExtension preserve uploaded format 
   assert.equal(resolveOutputFormat('same', 'jpeg'), 'jpeg');
   assert.equal(resolveOutputFormat('same', 'webp'), 'webp');
   assert.equal(resolveOutputFormat('same', 'png'), 'png');
+  assert.equal(resolveOutputFormat('same', 'heif'), 'jpeg');
+  assert.equal(resolveOutputFormat('same', 'avif'), 'jpeg');
+  assert.equal(resolveOutputFormat('same', 'tiff'), 'jpeg');
+  assert.equal(resolveOutputFormat('same', 'gif'), 'png');
+  assert.equal(resolveOutputFormat('same', 'bmp'), 'png');
+  assert.equal(resolveOutputFormat('same', 'svg'), 'png');
   assert.equal(resolveOutputFormat('png', 'jpeg'), 'png');
   assert.equal(resolveDownloadExtension('jpeg', 'holiday.JPG'), 'jpg');
   assert.equal(resolveDownloadExtension('jpeg', 'holiday.jpeg'), 'jpeg');
+  assert.equal(resolveDownloadExtension('jpeg', 'iphone.heic'), 'jpg');
   assert.equal(resolveDownloadExtension('webp', 'shot.webp'), 'webp');
   assert.equal(resolveDownloadExtension('png', 'portrait.png'), 'png');
+
+  const cd = buildContentDisposition('café "photo".png', '_avert_protected', 'png');
+  assert.ok(cd.includes('filename="caf_ _photo__avert_protected.png"'));
+  assert.ok(cd.includes("filename*=UTF-8''caf%C3%A9%20%22photo%22_avert_protected.png"));
 });
 

@@ -3,8 +3,8 @@ import {
   buildRefusalJudgePrompt,
   evaluateRefusalHeuristic,
   type ShadowQuestionType,
-} from '../src/lib/avertProtocol.js';
-import { DEFAULT_GENERAL_SHADOW_QUESTIONS } from '../src/lib/paperBenchmarks.js';
+} from '../src/lib/avertProtocol.ts';
+import { DEFAULT_GENERAL_SHADOW_QUESTIONS } from '../src/lib/paperBenchmarks.ts';
 
 const MODEL_ID = 'gemini-4-hydrogen';
 

@@ -177,22 +177,34 @@ export const VerifyWorkspace: React.FC<VerifyWorkspaceProps> = ({
         formData.append('image', manualImageFile);
       }
       if (manualManifestText.trim()) {
-        // Validate JSON before sending
-        JSON.parse(manualManifestText);
+        try {
+          JSON.parse(manualManifestText);
+        } catch {
+          setManualError('Manifest text is not valid JSON.');
+          return;
+        }
         formData.append('manifest', manualManifestText.trim());
       }
       const resp = await fetch('/api/v1/verify', {
         method: 'POST',
         body: formData,
       });
-      const data = await resp.json();
-      if (!resp.ok || !data?.checks) {
-        setManualError(data?.error || 'Verification failed');
+      const text = await resp.text();
+      let data: (VerificationResult & { error?: string }) | null = null;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = null;
+      }
+      if (!data || !resp.ok || !data?.checks) {
+        setManualError(
+          data?.error || `Verification failed (HTTP ${resp.status || 'network error'}).`
+        );
       } else {
         setVerification(data);
       }
     } catch {
-      setManualError('Manifest text is not valid JSON.');
+      setManualError('Failed to contact verification service.');
     } finally {
       setVerifying(false);
     }
@@ -421,12 +433,15 @@ export const VerifyWorkspace: React.FC<VerifyWorkspaceProps> = ({
                 </label>
                 <label className="mt-1 flex cursor-pointer items-center gap-2 rounded-lg border border-slate-300 bg-slate-50 px-3 py-2 text-xs text-slate-700 hover:bg-slate-100">
                   <Upload className="h-4 w-4 text-slate-500" aria-hidden="true" />
-                  <span>{manualImageFile ? manualImageFile.name : 'Choose PNG / JPEG / WebP file'}</span>
+                  <span>{manualImageFile ? manualImageFile.name : 'Choose image file'}</span>
                   <input
                     type="file"
-                    accept="image/jpeg,image/png,image/webp"
+                    accept="image/*,.heic,.heif,.avif,.tiff,.tif,.bmp,.gif,.svg,.jfif"
                     className="sr-only"
-                    onChange={(e) => setManualImageFile(e.target.files?.[0] ?? null)}
+                    onChange={(e) => {
+                      setManualImageFile(e.target.files?.[0] ?? null);
+                      e.target.value = '';
+                    }}
                   />
                 </label>
               </div>

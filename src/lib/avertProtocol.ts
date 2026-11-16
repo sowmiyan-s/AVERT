@@ -19,7 +19,16 @@ export function resolveOutputFormat(
   if (pref === 'jpeg' || pref === 'jpg') return 'jpeg';
 
   const detected = (detectedSourceFormat ?? 'png').toLowerCase();
-  if (detected === 'jpeg' || detected === 'jpg') return 'jpeg';
+  if (
+    detected === 'jpeg' ||
+    detected === 'jpg' ||
+    detected === 'heif' ||
+    detected === 'avif' ||
+    detected === 'tiff' ||
+    detected === 'tif'
+  ) {
+    return 'jpeg';
+  }
   if (detected === 'webp') return 'webp';
   return 'png';
 }
@@ -29,9 +38,27 @@ export function resolveDownloadExtension(
   originalFilename: string
 ): string {
   if (outputFormat === 'jpeg') {
-    return /\.jpg$/i.test(originalFilename) ? 'jpg' : 'jpeg';
+    return /\.jpeg$/i.test(originalFilename) ? 'jpeg' : 'jpg';
   }
   return outputFormat;
+}
+
+export function buildContentDisposition(
+  originalFilename: string,
+  suffix: string,
+  ext: string
+): string {
+  const rawBase = originalFilename.replace(/\.[^.]+$/, '') || 'image';
+  const fullName = `${rawBase}${suffix}.${ext}`;
+  const asciiFallback = fullName
+    .replace(/[^\x20-\x7E]/g, '_')
+    .replace(/["\\;\r\n]/g, '_')
+    .trim() || `image${suffix}.${ext}`;
+  const utf8Encoded = encodeURIComponent(fullName).replace(
+    /['()*]/g,
+    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`
+  );
+  return `attachment; filename="${asciiFallback}"; filename*=UTF-8''${utf8Encoded}`;
 }
 
 export interface AvertManifestUnsigned {

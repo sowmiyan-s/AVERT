@@ -78,6 +78,7 @@ export const ProtectWorkspace: React.FC<ProtectWorkspaceProps> = ({
   const [selectedSampleId, setSelectedSampleId] = useState<string>('sample_portrait');
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [uploadedPreviewUrl, setUploadedPreviewUrl] = useState<string | null>(null);
+  const [previewFailed, setPreviewFailed] = useState<boolean>(false);
   const [uploadedMeta, setUploadedMeta] = useState<{
     name: string;
     size: number;
@@ -134,16 +135,18 @@ export const ProtectWorkspace: React.FC<ProtectWorkspaceProps> = ({
     };
   }, [uploadedPreviewUrl]);
 
-  const handleSelectFile = (file: File | undefined) => {
+  const handleSelectFile = async (file: File | undefined) => {
     if (!file) return;
-    const validTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
-    const validExt = /\.(jpe?g|png|webp)$/i.test(file.name);
-    if (!validTypes.includes(file.type) && !validExt) {
+    const isImageMime = file.type.startsWith('image/');
+    const validExt = /\.(jpe?g|jfif|pjpeg|png|webp|gif|bmp|tiff?|avif|heic|heif|svg|ico)$/i.test(
+      file.name
+    );
+    if (!isImageMime && !validExt) {
       setJobState({
         running: false,
         stage: '',
         progress: 0,
-        error: 'Unsupported file type. Upload JPEG, PNG, or WebP.',
+        error: 'Please select a valid image file (JPEG, PNG, WebP, HEIC, AVIF, GIF, TIFF, BMP, or SVG).',
       });
       return;
     }
@@ -156,27 +159,57 @@ export const ProtectWorkspace: React.FC<ProtectWorkspaceProps> = ({
       });
       return;
     }
+
+    let fileToUse = file;
+    // Normalize .ico or other browser-only image formats to lossless PNG when possible
+    if (/\.(ico)$/i.test(file.name) || file.type === 'image/x-icon' || file.type === 'image/vnd.microsoft.icon') {
+      try {
+        const bitmap = await createImageBitmap(file);
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(16, bitmap.width);
+        canvas.height = Math.max(16, bitmap.height);
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+          const pngBlob = await new Promise<Blob | null>((resolve) =>
+            canvas.toBlob((b) => resolve(b), 'image/png')
+          );
+          if (pngBlob) {
+            fileToUse = new File(
+              [pngBlob],
+              file.name.replace(/\.[^.]+$/, '.png'),
+              { type: 'image/png' }
+            );
+          }
+        }
+      } catch {
+        // Fallback to sending raw file to backend
+      }
+    }
+
     if (uploadedPreviewUrl) {
       URL.revokeObjectURL(uploadedPreviewUrl);
     }
-    const url = URL.createObjectURL(file);
+    const url = URL.createObjectURL(fileToUse);
+    setPreviewFailed(false);
     const img = new Image();
     img.onload = () => {
       setUploadedMeta({
-        name: file.name,
-        size: file.size,
+        name: fileToUse.name,
+        size: fileToUse.size,
         dimensions: `${img.naturalWidth} × ${img.naturalHeight}`,
       });
     };
     img.onerror = () => {
+      setPreviewFailed(true);
       setUploadedMeta({
-        name: file.name,
-        size: file.size,
-        dimensions: 'Ready',
+        name: fileToUse.name,
+        size: fileToUse.size,
+        dimensions: 'Uploaded',
       });
     };
     img.src = url;
-    setUploadedFile(file);
+    setUploadedFile(fileToUse);
     setUploadedPreviewUrl(url);
     setJobState((prev) => ({ ...prev, error: null }));
   };
@@ -186,6 +219,7 @@ export const ProtectWorkspace: React.FC<ProtectWorkspaceProps> = ({
       URL.revokeObjectURL(uploadedPreviewUrl);
       setUploadedPreviewUrl(null);
     }
+    setPreviewFailed(false);
     setUploadedFile(null);
     setUploadedMeta(null);
     setSelectedSampleId(sample.id);
@@ -233,6 +267,89 @@ export const ProtectWorkspace: React.FC<ProtectWorkspaceProps> = ({
     }
   };
 
+  const compressImageForUpload = async (file: File, maxBytes: number): Promise<File> => {
+    if (file.size <= maxBytes) return file;
+    try {
+      const bitmap = await createImageBitmap(file);
+      let targetW = bitmap.width;
+      let targetH = bitmap.height;
+      const maxDim = maxBytes < 1_000_000 ? 1600 : 2200;
+      if (targetW > maxDim || targetH > maxDim) {
+        const scale = Math.min(maxDim / targetW, maxDim / targetH);
+        targetW = Math.max(16, Math.round(targetW * scale));
+        targetH = Math.max(16, Math.round(targetH * scale));
+      }
+
+      const preferJpeg =
+        /jpe?g|jfif|heic|heif|avif|tiff?/i.test(file.name) ||
+        /image\/(jpeg|heic|heif|avif|tiff)/i.test(file.type);
+      const targetMime = preferJpeg ? 'image/jpeg' : 'image/png';
+      const targetExt = preferJpeg ? 'jpg' : 'png';
+
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return file;
+
+      for (const scaleFactor of [1, 0.75, 0.55, 0.4]) {
+        const w = Math.max(16, Math.round(targetW * scaleFactor));
+        const h = Math.max(16, Math.round(targetH * scaleFactor));
+        canvas.width = w;
+        canvas.height = h;
+        ctx.clearRect(0, 0, w, h);
+        ctx.drawImage(bitmap, 0, 0, w, h);
+
+        const qualities = preferJpeg ? [0.9, 0.8, 0.68] : [undefined];
+        for (const q of qualities) {
+          const blob = await new Promise<Blob | null>((resolve) =>
+            canvas.toBlob((b) => resolve(b), targetMime, q)
+          );
+          if (blob && blob.size <= maxBytes) {
+            const baseName = file.name.replace(/\.[^.]+$/, '') || 'image';
+            return new File([blob], `${baseName}.${targetExt}`, { type: targetMime });
+          }
+        }
+        // If PNG still exceeded maxBytes, fall back to JPEG at 0.85
+        if (!preferJpeg) {
+          const jpgBlob = await new Promise<Blob | null>((resolve) =>
+            canvas.toBlob((b) => resolve(b), 'image/jpeg', 0.86)
+          );
+          if (jpgBlob && jpgBlob.size <= maxBytes) {
+            const baseName = file.name.replace(/\.[^.]+$/, '') || 'image';
+            return new File([jpgBlob], `${baseName}.jpg`, { type: 'image/jpeg' });
+          }
+        }
+      }
+      return file;
+    } catch {
+      return file;
+    }
+  };
+
+  const buildProtectionFormData = (fileToSend: File | null): FormData => {
+    const formData = new FormData();
+    if (fileToSend) {
+      formData.append('image', fileToSend);
+    } else {
+      formData.append('sample_id', selectedSampleId);
+    }
+    formData.append('policy', policy);
+    formData.append('output_format', outputFormat);
+    formData.append('apply_perturbation', String(applyPerturbation));
+    formData.append('epsilon_over_255', String(epsilonOver255));
+    formData.append('step_size_alpha', String(stepSizeAlpha));
+    formData.append('max_iter', String(maxIter));
+    formData.append('shadow_question_type', shadowType);
+    formData.append('shadow_questions', JSON.stringify(shadowQuestions));
+    formData.append('target_refusal', targetRefusal);
+    if (ownerRef.trim()) {
+      formData.append('owner_reference', ownerRef.trim());
+    }
+    if (expiresHours) {
+      formData.append('expires_hours', expiresHours);
+    }
+    return formData;
+  };
+
   const handleRunProtection = async () => {
     setJobState({
       running: true,
@@ -242,53 +359,77 @@ export const ProtectWorkspace: React.FC<ProtectWorkspaceProps> = ({
     });
 
     try {
-      const formData = new FormData();
-      if (uploadedFile) {
-        formData.append('image', uploadedFile);
-      } else {
-        formData.append('sample_id', selectedSampleId);
-      }
-      formData.append('policy', policy);
-      formData.append('output_format', outputFormat);
-      formData.append('apply_perturbation', String(applyPerturbation));
-      formData.append('epsilon_over_255', String(epsilonOver255));
-      formData.append('step_size_alpha', String(stepSizeAlpha));
-      formData.append('max_iter', String(maxIter));
-      formData.append('shadow_question_type', shadowType);
-      formData.append('shadow_questions', JSON.stringify(shadowQuestions));
-      formData.append('target_refusal', targetRefusal);
-      if (ownerRef.trim()) {
-        formData.append('owner_reference', ownerRef.trim());
-      }
-      if (expiresHours) {
-        formData.append('expires_hours', expiresHours);
+      let fileToSend = uploadedFile;
+      if (fileToSend && fileToSend.size > 2.5 * 1024 * 1024) {
+        fileToSend = await compressImageForUpload(fileToSend, 2.2 * 1024 * 1024);
       }
 
-      const startResp = await fetch('/api/v1/protections', {
-        method: 'POST',
-        body: formData,
-      });
-      const startText = await startResp.text();
-      let startData: { job_id?: string; error?: string };
-      try {
-        startData = JSON.parse(startText);
-      } catch {
-        throw new Error('Server returned an invalid response.');
-      }
-      if (!startResp.ok || !startData.job_id) {
-        throw new Error(startData.error || 'Failed to start protection job');
-      }
+      const submitWithRetry = async (fileCandidate: File | null, allowResizeRetry: boolean) => {
+        const resp = await fetch('/api/v1/protections', {
+          method: 'POST',
+          body: buildProtectionFormData(fileCandidate),
+        });
+        const text = await resp.text();
+        let parsed: { job_id?: string; error?: string } | null = null;
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          parsed = null;
+        }
 
-      const jobId = startData.job_id;
+        if (resp.status === 413 && fileCandidate && allowResizeRetry) {
+          const smaller = await compressImageForUpload(fileCandidate, 750 * 1024);
+          if (smaller.size < fileCandidate.size) {
+            return submitWithRetry(smaller, false);
+          }
+        }
+
+        if ((resp.status === 502 || resp.status === 503 || resp.status === 504) && allowResizeRetry) {
+          await new Promise((r) => setTimeout(r, 900));
+          return submitWithRetry(fileCandidate, false);
+        }
+
+        if (!parsed) {
+          if (resp.status === 413) {
+            throw new Error('Image upload exceeds proxy size limit. Please try a smaller image.');
+          }
+          throw new Error(
+            `Upload failed (HTTP ${resp.status || 'network error'}). Please try again.`
+          );
+        }
+        if (!resp.ok || !parsed.job_id) {
+          throw new Error(parsed.error || `Failed to start protection job (HTTP ${resp.status}).`);
+        }
+        return parsed.job_id;
+      };
+
+      const jobId = await submitWithRetry(fileToSend, true);
 
       // Poll backend job status with generous timeout for large images
       let completedProtectionId: string | null = null;
       for (let attempt = 0; attempt < 180; attempt++) {
         const jobResp = await fetch(`/api/v1/jobs/${jobId}`);
-        if (!jobResp.ok) {
-          throw new Error('Job status unavailable. Please try again.');
+        if (jobResp.status === 502 || jobResp.status === 503 || jobResp.status === 504) {
+          await new Promise((r) => setTimeout(r, 500));
+          continue;
         }
-        const jobData = await jobResp.json();
+        const jobText = await jobResp.text();
+        let jobData: {
+          status?: string;
+          stage?: string;
+          progress?: number;
+          protection_id?: string;
+          error?: string;
+        };
+        try {
+          jobData = JSON.parse(jobText);
+        } catch {
+          throw new Error(`Job status check returned HTTP ${jobResp.status}. Please try again.`);
+        }
+        if (!jobResp.ok) {
+          throw new Error(jobData.error || 'Job status unavailable. Please try again.');
+        }
+
         setJobState({
           running: jobData.status !== 'completed' && jobData.status !== 'failed',
           stage: jobData.stage || 'Processing',
@@ -311,7 +452,13 @@ export const ProtectWorkspace: React.FC<ProtectWorkspaceProps> = ({
       }
 
       const recResp = await fetch(`/api/v1/protections/${completedProtectionId}`);
-      const recData = await recResp.json();
+      const recText = await recResp.text();
+      let recData: Partial<ProtectionRecord> & { error?: string };
+      try {
+        recData = JSON.parse(recText);
+      } catch {
+        throw new Error(`Failed to load protected output (HTTP ${recResp.status}).`);
+      }
       if (!recResp.ok || !recData.protection_id) {
         throw new Error(recData.error || 'Failed to load protected output');
       }
@@ -358,7 +505,7 @@ export const ProtectWorkspace: React.FC<ProtectWorkspaceProps> = ({
                 1. Source Image
               </h2>
               <span className="font-mono text-xs text-slate-500 whitespace-nowrap">
-                JPEG · PNG · WebP · Max 12 MB
+                All common images · Max 12 MB
               </span>
             </div>
 
@@ -366,7 +513,7 @@ export const ProtectWorkspace: React.FC<ProtectWorkspaceProps> = ({
               onDragOver={(e) => e.preventDefault()}
               onDrop={(e) => {
                 e.preventDefault();
-                handleSelectFile(e.dataTransfer.files?.[0]);
+                void handleSelectFile(e.dataTransfer.files?.[0]);
               }}
               className="flex flex-col items-center justify-center rounded-lg border border-dashed border-slate-300 bg-slate-50/70 px-4 py-5 text-center transition-colors hover:border-[#1D4ED8]"
             >
@@ -375,16 +522,16 @@ export const ProtectWorkspace: React.FC<ProtectWorkspaceProps> = ({
                 Drop an image here or browse from disk
               </p>
               <p className="mt-0.5 text-xs text-slate-500">
-                EXIF stripped on export
+                JPEG, PNG, WebP, HEIC, AVIF, GIF, TIFF, BMP, SVG · EXIF stripped
               </p>
               <input
                 ref={fileInputRef}
                 type="file"
-                accept="image/jpeg,image/png,image/webp"
+                accept="image/*,.heic,.heif,.avif,.tiff,.tif,.bmp,.gif,.svg,.jfif"
                 aria-label="Upload image file"
                 className="sr-only"
                 onChange={(e) => {
-                  handleSelectFile(e.target.files?.[0]);
+                  void handleSelectFile(e.target.files?.[0]);
                   e.target.value = '';
                 }}
               />
@@ -409,6 +556,7 @@ export const ProtectWorkspace: React.FC<ProtectWorkspaceProps> = ({
                   type="button"
                   onClick={() => {
                     if (uploadedPreviewUrl) URL.revokeObjectURL(uploadedPreviewUrl);
+                    setPreviewFailed(false);
                     setUploadedFile(null);
                     setUploadedPreviewUrl(null);
                     setUploadedMeta(null);
@@ -509,19 +657,26 @@ export const ProtectWorkspace: React.FC<ProtectWorkspaceProps> = ({
                   className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-sm text-slate-900"
                 >
                   <option value="same">
-                    Same as uploaded (
                     {uploadedFile
-                      ? uploadedFile.type === 'image/jpeg'
-                        ? 'JPEG'
-                        : uploadedFile.type === 'image/webp'
-                          ? 'WebP'
-                          : 'PNG'
-                      : 'PNG'}
-                    )
+                      ? (() => {
+                          const t = uploadedFile.type.toLowerCase();
+                          const n = uploadedFile.name.toLowerCase();
+                          if (t === 'image/jpeg' || t === 'image/jpg' || /\.(jpe?g|jfif|pjpeg)$/.test(n)) {
+                            return 'Same as uploaded (JPEG)';
+                          }
+                          if (t === 'image/webp' || /\.webp$/.test(n)) {
+                            return 'Same as uploaded (WebP)';
+                          }
+                          if (t === 'image/heic' || t === 'image/heif' || t === 'image/avif' || t === 'image/tiff' || /\.(heic|heif|avif|tiff?)$/.test(n)) {
+                            return 'Universal (JPEG)';
+                          }
+                          return 'Same as uploaded (PNG)';
+                        })()
+                      : 'Same as uploaded (PNG)'}
                   </option>
-                  <option value="png">PNG (Lossless)</option>
+                  <option value="png">PNG (Universal Lossless)</option>
+                  <option value="jpeg">JPEG (Universal Baseline)</option>
                   <option value="webp">WebP (Q=95)</option>
-                  <option value="jpeg">JPEG (Q=95)</option>
                 </select>
               </div>
 
@@ -603,8 +758,8 @@ export const ProtectWorkspace: React.FC<ProtectWorkspaceProps> = ({
                       className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-900"
                     >
                       <option value={4}>4 / 255 (Subtle)</option>
-                      <option value={8}>8 / 255 (Recommended)</option>
-                      <option value={12}>12 / 255 (Stronger)</option>
+                      <option value={8}>8 / 255 (Default)</option>
+                      <option value={12}>12 / 255 (Strong)</option>
                       <option value={16}>16 / 255 (Max)</option>
                     </select>
                   </div>
@@ -623,7 +778,7 @@ export const ProtectWorkspace: React.FC<ProtectWorkspaceProps> = ({
                       className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-900"
                     >
                       <option value={0.004}>0.004</option>
-                      <option value={0.005}>0.005 (General/Sim.)</option>
+                      <option value={0.005}>0.005 (Default)</option>
                       <option value={0.007}>0.007 (Exact)</option>
                     </select>
                   </div>
@@ -642,7 +797,7 @@ export const ProtectWorkspace: React.FC<ProtectWorkspaceProps> = ({
                       className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-900"
                     >
                       <option value={500}>500</option>
-                      <option value={1000}>1000</option>
+                      <option value={1000}>1000 (Default)</option>
                       <option value={1500}>1500 (Peak)</option>
                     </select>
                   </div>
@@ -813,11 +968,11 @@ export const ProtectWorkspace: React.FC<ProtectWorkspaceProps> = ({
               </div>
 
               {activeProtection && (
-                <div className="flex items-center gap-1 rounded-lg bg-slate-100 p-1">
+                <div className="flex flex-wrap items-center gap-1 rounded-lg bg-slate-100 p-1">
                   <button
                     type="button"
                     onClick={() => setPreviewMode('side_by_side')}
-                    className={`rounded-md px-3 py-1 text-xs font-medium cursor-pointer ${
+                    className={`rounded-md px-2.5 py-1 text-xs font-medium whitespace-nowrap cursor-pointer ${
                       previewMode === 'side_by_side'
                         ? 'bg-white text-slate-900 shadow-xs'
                         : 'text-slate-600 hover:text-slate-900'
@@ -828,7 +983,7 @@ export const ProtectWorkspace: React.FC<ProtectWorkspaceProps> = ({
                   <button
                     type="button"
                     onClick={() => setPreviewMode('diff')}
-                    className={`rounded-md px-3 py-1 text-xs font-medium cursor-pointer ${
+                    className={`rounded-md px-2.5 py-1 text-xs font-medium whitespace-nowrap cursor-pointer ${
                       previewMode === 'diff'
                         ? 'bg-white text-slate-900 shadow-xs'
                         : 'text-slate-600 hover:text-slate-900'
@@ -839,7 +994,7 @@ export const ProtectWorkspace: React.FC<ProtectWorkspaceProps> = ({
                   <button
                     type="button"
                     onClick={() => setPreviewMode('manifest')}
-                    className={`rounded-md px-3 py-1 text-xs font-medium cursor-pointer ${
+                    className={`rounded-md px-2.5 py-1 text-xs font-medium whitespace-nowrap cursor-pointer ${
                       previewMode === 'manifest'
                         ? 'bg-white text-slate-900 shadow-xs'
                         : 'text-slate-600 hover:text-slate-900'
@@ -853,17 +1008,22 @@ export const ProtectWorkspace: React.FC<ProtectWorkspaceProps> = ({
 
             {!activeProtection ? (
               <div className="flex flex-col items-center justify-center rounded-lg border border-slate-200 bg-slate-50 p-6">
-                {currentPreviewSrc ? (
+                {currentPreviewSrc && !previewFailed ? (
                   <img
                     src={currentPreviewSrc}
                     alt="Selected source preview"
                     referrerPolicy="no-referrer"
+                    onError={() => setPreviewFailed(true)}
                     className="max-h-[340px] rounded-lg border border-slate-200 object-contain"
                   />
                 ) : (
-                  <div className="flex h-64 flex-col items-center justify-center text-slate-400">
-                    <ImageIcon className="mb-2 h-8 w-8" aria-hidden="true" />
-                    <p className="text-sm">Select a sample or upload an image</p>
+                  <div className="flex h-48 flex-col items-center justify-center text-center text-slate-500">
+                    <ImageIcon className="mb-2 h-8 w-8 text-slate-400" aria-hidden="true" />
+                    <p className="text-sm font-medium text-slate-700">
+                      {uploadedMeta
+                        ? `${uploadedMeta.name} ready to protect`
+                        : 'Select a sample or upload an image'}
+                    </p>
                   </div>
                 )}
                 <p className="mt-3 text-xs text-slate-500">

@@ -5,8 +5,8 @@ import path from 'node:path';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import multer from 'multer';
 import sharp from 'sharp';
-import { createServer as createViteServer } from 'vite';
 import {
+  buildContentDisposition,
   evaluateVerificationState,
   resolveDownloadExtension,
   resolveOutputFormat,
@@ -15,11 +15,11 @@ import {
   type OutputFormatPreference,
   type ProtectionRecord,
   type ShadowQuestionType,
-} from './src/lib/avertProtocol.js';
+} from './src/lib/avertProtocol.ts';
 import {
   DEFAULT_GENERAL_SHADOW_QUESTIONS,
   REFUSAL_TARGETS,
-} from './src/lib/paperBenchmarks.js';
+} from './src/lib/paperBenchmarks.ts';
 import {
   createJob,
   getAuditEvents,
@@ -36,19 +36,19 @@ import {
   updateJob,
   validateAndConsumeGrant,
   verifyManifestSignature,
-} from './server/cryptoService.js';
+} from './server/cryptoService.ts';
 import {
   applyAttackerTransformation,
   applyProtectionExport,
   getSampleImageBuffer,
   SAMPLE_DESCRIPTORS,
   validateAndDecodeImage,
-} from './server/imageEngine.js';
+} from './server/imageEngine.ts';
 import {
   generateShadowQuestions,
   runCompatibleEditorEditAnalysis,
   runNonCooperativeMllmProbe,
-} from './server/geminiService.js';
+} from './server/geminiService.ts';
 
 const PORT = Number(process.env.PORT ?? 3000);
 const upload = multer({
@@ -461,11 +461,11 @@ async function startServer() {
     const fmt = entry.record.output_format;
     const ext = resolveDownloadExtension(fmt, entry.record.sample_or_filename);
     res.setHeader('Content-Type', `image/${fmt === 'jpeg' ? 'jpeg' : fmt}`);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     if (req.query.download === '1') {
-      const base = entry.record.sample_or_filename.replace(/\.[^.]+$/, '');
       res.setHeader(
         'Content-Disposition',
-        `attachment; filename="${base}_avert_protected.${ext}"`
+        buildContentDisposition(entry.record.sample_or_filename, '_avert_protected', ext)
       );
     }
     res.send(entry.protectedBuffer);
@@ -478,6 +478,7 @@ async function startServer() {
       return;
     }
     res.setHeader('Content-Type', 'image/png');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     res.send(entry.originalBuffer);
   });
 
@@ -488,6 +489,7 @@ async function startServer() {
       return;
     }
     res.setHeader('Content-Type', 'image/png');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     res.send(entry.diffBuffer);
   });
 
@@ -500,7 +502,7 @@ async function startServer() {
     if (req.query.download === '1') {
       res.setHeader(
         'Content-Disposition',
-        `attachment; filename="${entry.record.protection_id}.manifest.json"`
+        buildContentDisposition(entry.record.protection_id, '.manifest', 'json')
       );
     }
     res.json(entry.record.manifest);
@@ -848,6 +850,7 @@ async function startServer() {
   await seedDemoProtection();
 
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
